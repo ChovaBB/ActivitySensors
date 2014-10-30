@@ -1,13 +1,18 @@
 package org.adaptlab.android.fit;
 
+import java.util.ArrayList;
 import java.util.concurrent.TimeUnit;
+
+import org.adaptlab.android.logging.Log;
+import org.adaptlab.android.logging.LogView;
+import org.adaptlab.android.logging.LogWrapper;
+import org.adaptlab.android.logging.MessageOnlyLogFilter;
 
 import android.app.Activity;
 import android.content.Intent;
 import android.content.IntentSender;
-import android.content.IntentSender.SendIntentException;
+import android.graphics.Color;
 import android.os.Bundle;
-import android.util.Log;
 import android.view.Menu;
 import android.view.MenuItem;
 
@@ -20,37 +25,63 @@ import com.google.android.gms.common.api.ResultCallback;
 import com.google.android.gms.common.api.Status;
 import com.google.android.gms.fitness.Fitness;
 import com.google.android.gms.fitness.FitnessScopes;
-import com.google.android.gms.fitness.FitnessStatusCodes;
-import com.google.android.gms.fitness.data.BleDevice;
 import com.google.android.gms.fitness.data.DataPoint;
 import com.google.android.gms.fitness.data.DataSource;
 import com.google.android.gms.fitness.data.DataType;
 import com.google.android.gms.fitness.data.DataTypes;
 import com.google.android.gms.fitness.data.Field;
+import com.google.android.gms.fitness.data.Subscription;
 import com.google.android.gms.fitness.data.Value;
-import com.google.android.gms.fitness.request.BleScanCallback;
 import com.google.android.gms.fitness.request.DataSourceListener;
 import com.google.android.gms.fitness.request.DataSourcesRequest;
 import com.google.android.gms.fitness.request.SensorRequest;
-import com.google.android.gms.fitness.request.StartBleScanRequest;
 import com.google.android.gms.fitness.result.DataSourcesResult;
+import com.google.android.gms.fitness.result.ListSubscriptionsResult;
 
 public class ActivityMonitorActivity extends Activity {
 	private static final String TAG = "ActivityMonitorActivity";
 	private static final String AUTH_PENDING = "auth_state_pending";
     private static final int REQUEST_OAUTH = 1;
     private static final int REQUEST_BLUETOOTH = 1001;
-    
+    private static final int INTERVAL = 30;
+
 	private boolean authInProgress = false;
     private GoogleApiClient mClient = null;
-    private DataSourceListener mLocationListener;
-    private DataSourceListener mHeartRateBpmListener;
-    private DataSourceListener mStepCountCumulativeListener;
+    private static DataSourceListener mLocationListener;
+    private static DataSourceListener mHeartRateBpmListener;
+    private static DataSourceListener mStepCountCumulativeListener;
+    private static DataSourceListener mStepCountDeltaListener;
+    private static DataSourceListener mDistanceCumulativeListener;
+    private static DataSourceListener mDistanceDeltaListener;
+    private static DataSourceListener mActivitySampleListener;
+
+    //private BlueToothDevicesManager mBleDevicesManager;
+    
+    private static final DataType[] myDataTypes = { 
+    	DataTypes.LOCATION_SAMPLE,
+    	DataTypes.HEART_RATE_BPM, 
+    	DataTypes.STEP_COUNT_CUMULATIVE, 
+    	DataTypes.STEP_COUNT_DELTA,
+    	DataTypes.DISTANCE_CUMULATIVE,
+    	DataTypes.DISTANCE_DELTA,
+    	DataTypes.ACTIVITY_SAMPLE 
+    };
+    
+    private static final DataSourceListener[] mDataSourceListeners = {
+    	mLocationListener,
+    	mHeartRateBpmListener,
+    	mStepCountCumulativeListener,
+    	mStepCountDeltaListener,
+    	mDistanceCumulativeListener,
+    	mDistanceDeltaListener,
+    	mActivitySampleListener
+    };
 	
 	@Override
 	protected void onCreate(Bundle savedInstanceState) {
 		super.onCreate(savedInstanceState);
 		setContentView(R.layout.activity_activity_monitor);
+		initializeLogging();
 		if (savedInstanceState != null) {
             authInProgress = savedInstanceState.getBoolean(AUTH_PENDING);
         }
@@ -91,6 +122,7 @@ public class ActivityMonitorActivity extends Activity {
         if (mClient.isConnected()) {
             mClient.disconnect();
         }
+        unRegisterFitnessDataListeners();
     }
 
     @Override
@@ -104,7 +136,7 @@ public class ActivityMonitorActivity extends Activity {
                 }
             }
         } else if (requestCode == REQUEST_BLUETOOTH) {
-        	startBleScan();
+        	//mBleDevicesManager.startBleScan();
         }
     }
 
@@ -123,9 +155,11 @@ public class ActivityMonitorActivity extends Activity {
                             public void onConnected(Bundle bundle) {
                                 Log.i(TAG, "Connected!!!");
                                 findFitnessDataSources();
+                                subscribeIfNotAlreadySubscribed();
+                                //mBleDevicesManager.startBleScan();
                             }
 
-                            @Override
+							@Override
                             public void onConnectionSuspended(int i) {
                                 if (i == ConnectionCallbacks.CAUSE_NETWORK_LOST) {
                                     Log.i(TAG, "Connection lost.  Cause: Network Lost.");
@@ -159,88 +193,59 @@ public class ActivityMonitorActivity extends Activity {
                 )
                 
                 .build();
+        //mBleDevicesManager = new BlueToothDevicesManager(this, mClient);
     }
 	
 	private void findFitnessDataSources() {
-		startBleScan();
 		
 		Fitness.SensorsApi.findDataSources(mClient, new DataSourcesRequest.Builder()
             //specify at least one data type    
-        	.setDataTypes
-                (
-                        //DataTypes.ACTIVITY_SAMPLE,
-                        DataTypes.LOCATION_SAMPLE,
-                        DataTypes.HEART_RATE_BPM,
-                        DataTypes.STEP_COUNT_CUMULATIVE
-                        //DataTypes.CALORIES_EXPENDED
-        		)
+        	.setDataTypes (myDataTypes)
                 // Can specify whether data type is raw or derived.
                 //.setDataSourceTypes(DataSource.TYPE_RAW)
                 .build())
                 .setResultCallback(new ResultCallback<DataSourcesResult>() {
                     @Override
                     public void onResult(DataSourcesResult dataSourcesResult) {
-                        Log.i(TAG, "Result: " + dataSourcesResult.getStatus().toString());
                         for (DataSource dataSource : dataSourcesResult.getDataSources()) {
-                            Log.i(TAG, "Data source found: " + dataSource.toString());
-                            Log.i(TAG, "Data Source type: " + dataSource.getDataType().getName());
-
+                            Log.i(TAG, "Data source found: " + dataSource.getName());
+                            
                             //Register listeners to receive Activity data!
                             if (dataSource.getDataType().equals(DataTypes.LOCATION_SAMPLE) && mLocationListener == null) {
-                                Log.i(TAG, "Data source for LOCATION found!  Registering.");
-                                createLocationDataListener(dataSource, DataTypes.LOCATION_SAMPLE);
+                                createDataListener(mLocationListener, dataSource, DataTypes.LOCATION_SAMPLE);
                             } else if (dataSource.getDataType().equals(DataTypes.HEART_RATE_BPM) && mHeartRateBpmListener == null) {
-                                Log.i(TAG, "Data source for HEART RATE BPM found!  Registering.");
-                                createHeartRateDataListener(dataSource, DataTypes.HEART_RATE_BPM);
+                                createDataListener(mHeartRateBpmListener, dataSource, DataTypes.HEART_RATE_BPM);
                             } else if (dataSource.getDataType().equals(DataTypes.STEP_COUNT_CUMULATIVE) && mStepCountCumulativeListener == null) {
-                                Log.i(TAG, "Data source for STEP_COUNT_CUMULATIVE found!  Registering.");
-                                createStepCountDataListener(dataSource, DataTypes.STEP_COUNT_CUMULATIVE);
-                            } 
+                                createDataListener(mStepCountCumulativeListener, dataSource, DataTypes.STEP_COUNT_CUMULATIVE);
+                            } else if (dataSource.getDataType().equals(DataTypes.STEP_COUNT_DELTA) && mStepCountDeltaListener == null) {
+                                createDataListener(mStepCountDeltaListener, dataSource, DataTypes.STEP_COUNT_DELTA);
+                            } else if (dataSource.getDataType().equals(DataTypes.DISTANCE_CUMULATIVE) && mDistanceCumulativeListener == null) {
+                                createDataListener(mDistanceCumulativeListener, dataSource, DataTypes.DISTANCE_CUMULATIVE);
+                            } else if (dataSource.getDataType().equals(DataTypes.DISTANCE_DELTA) && mDistanceDeltaListener == null) {
+                                createDataListener(mDistanceDeltaListener, dataSource, DataTypes.DISTANCE_DELTA);
+                            } else if (dataSource.getDataType().equals(DataTypes.ACTIVITY_SAMPLE) && mActivitySampleListener == null) {
+                                createDataListener(mActivitySampleListener, dataSource, DataTypes.ACTIVITY_SAMPLE);
+                            }
                         }
                     }
         });
     }
 	
-	private void createLocationDataListener(DataSource dataSource, DataType dataType) {
-		mLocationListener = new DataSourceListener() {
+	private void createDataListener(DataSourceListener listener, DataSource dataSource, DataType dataType) {
+		listener = new DataSourceListener() {
             @Override
             public void onEvent(DataPoint dataPoint) {
                 for (Field field : dataPoint.getDataType().getFields()) {
                     Value val = dataPoint.getValue(field);
+                    Log.i(TAG, "Detected DataPoint field contents: " + field.describeContents());
                     Log.i(TAG, "Detected DataPoint field: " + field.getName());
                     Log.i(TAG, "Detected DataPoint value: " + val);
+                    Log.i(TAG, "Detected DataPoint source: " + dataPoint.getDataSource());
+                    Log.i(TAG, "Detected DataPoint original source: " + dataPoint.getOriginalDataSource());
                 }
             }
         };
-        registerDataListener(dataSource, dataType, mLocationListener);
-    }
-	
-	private void createHeartRateDataListener(DataSource dataSource, DataType dataType) {
-		mHeartRateBpmListener = new DataSourceListener() {
-            @Override
-            public void onEvent(DataPoint dataPoint) {
-                for (Field field : dataPoint.getDataType().getFields()) {
-                    Value val = dataPoint.getValue(field);
-                    Log.i(TAG, "Detected DataPoint field: " + field.getName());
-                    Log.i(TAG, "Detected DataPoint value: " + val);
-                }
-            }
-        };
-        registerDataListener(dataSource, dataType, mHeartRateBpmListener);
-    }
-	
-	private void createStepCountDataListener(DataSource dataSource, DataType dataType) {
-		mStepCountCumulativeListener = new DataSourceListener() {
-            @Override
-            public void onEvent(DataPoint dataPoint) {
-                for (Field field : dataPoint.getDataType().getFields()) {
-                    Value val = dataPoint.getValue(field);
-                    Log.i(TAG, "Detected DataPoint field: " + field.getName());
-                    Log.i(TAG, "Detected DataPoint value: " + val);
-                }
-            }
-        };
-        registerDataListener(dataSource, dataType, mStepCountCumulativeListener);
+        registerDataListener(dataSource, dataType, listener);
 	}
 
 	private void registerDataListener(DataSource dataSource, DataType dataType, final DataSourceListener listener) {
@@ -248,14 +253,14 @@ public class ActivityMonitorActivity extends Activity {
                 new SensorRequest.Builder()
                         .setDataSource(dataSource)
                         .setDataType(dataType) 
-                        .setSamplingRate(1, TimeUnit.MINUTES)
+                        .setSamplingRate(INTERVAL, TimeUnit.SECONDS)
                         .build(),
                 listener)
                 .setResultCallback(new ResultCallback<Status>() {
                     @Override
                     public void onResult(Status status) {
                         if (status.isSuccess()) {
-                            Log.i(TAG, "Listener registered! " + listener.toString());
+                            Log.i(TAG, listener.toString() + " listener registered! ");
                         } else {
                             Log.i(TAG, "Listener not registered. " + listener.toString());
                         }
@@ -263,62 +268,89 @@ public class ActivityMonitorActivity extends Activity {
         });
 	}
 	
-	private void startBleScan() {
-        
-		BleScanCallback callback = new BleScanCallback() {
-            @Override
-			public void onDeviceFound(BleDevice device) {
-            	Log.i(TAG, "device found!");
-            	Log.i(TAG, device.getName());
-            	//claimDevice(device);
-            }
-            @Override
-            public void onScanStopped() {
-            	Log.i(TAG, "scan stopped");
-            }
-        };
-		
-		StartBleScanRequest request = new StartBleScanRequest.Builder()
-        	.setDataTypes(DataTypes.HEART_RATE_BPM)
-        	.setBleScanCallback(callback)
-        	.build();  
-		
-        PendingResult<Status> result = Fitness.BleApi.startBleScan(mClient, request);
-        result.setResultCallback(new ResultCallback<Status>() {
-            @Override
-            public void onResult(Status status) {
-                if (!status.isSuccess()) {
-                	switch (status.getStatusCode()) {
-                    case FitnessStatusCodes.DISABLED_BLUETOOTH:
-                        try {
-                            status.startResolutionForResult(ActivityMonitorActivity.this, REQUEST_BLUETOOTH);
-                        } catch (SendIntentException e) {
-                            //
-                        }
-                        break;
-                    //
-                }
-            	Log.i(TAG, "BLE scan unsuccessful");
-                } else {
-                	Log.i(TAG, "ble scan status message: " + status.getStatusMessage());
-                	Log.i(TAG, "BLE scan successful");
-                }
-            }
-        });
+	private void unRegisterFitnessDataListeners() {        
+        for (DataSourceListener listener : mDataSourceListeners) {
+        	if (listener != null) {
+        		unRegisterListener(listener);
+        	}
+        }
     }
 	
-    public void claimDevice(BleDevice device) {
-		PendingResult<Status> pendingResult = Fitness.BleApi.claimBleDevice(mClient, device);
-		pendingResult.setResultCallback(new ResultCallback<Status>() {
-			@Override
-			public void onResult(Status st) {
-				if (st.isSuccess()) {
-					Log.i(TAG, "Claimed device successfully");
-				} else {
-					Log.e(TAG, "Did not successfully claim device");
-				}
-			}
-		});
+	private void unRegisterListener(final DataSourceListener listener) {
+		Fitness.SensorsApi.unregister(mClient, listener)
+                .setResultCallback(new ResultCallback<Status>() {
+                    @Override
+                    public void onResult(Status status) {
+                        if (status.isSuccess()) {
+                            Log.i(TAG, listener + " listener was removed!");
+                        } else {
+                            Log.i(TAG, listener + " listener was not removed.");
+                        }
+                    }
+        });
 	}
+	
+	private void subscribeIfNotAlreadySubscribed() {
+		new Thread() {
+            public void run() {
+            	ListSubscriptionsResult subResults = getSubscriptionsList().await();
+            	ArrayList<DataType> subscribedDataTypes = new ArrayList<DataType>();
+            	
+            	for (Subscription sc : subResults.getSubscriptions()) {
+            		subscribedDataTypes.add(sc.getDataType());
+            	}
+            	
+            	for (DataType dt : myDataTypes) {
+            		if (!subscribedDataTypes.contains(dt)) {
+            			Status status = Fitness.RecordingApi.subscribe(mClient, dt).await();
+                        if (status.isSuccess()) {
+                            Log.i(TAG, "Successfully subscribed to DataType: " + dt.toString());
+                        } else {
+                            Log.i(TAG, "There was a problem subscribing to DataType: " + dt.toString());
+                        }
+            		}
+            	}  
+            	
+            }
+        }.start();
+	}
+	
+	private PendingResult<ListSubscriptionsResult> getSubscriptionsList() {
+        return Fitness.RecordingApi.listSubscriptions(mClient);
+    }
+	
+    public void cancelSubscription(Subscription sc) {
+        final String dataTypeStr = sc.getDataType().toString();
+        Log.i(TAG, "Unsubscribing from data type: " + dataTypeStr);
+
+        Fitness.RecordingApi.unsubscribe(mClient, sc.getDataType())
+                .setResultCallback(new ResultCallback<Status>() {
+                    @Override
+                    public void onResult(Status status) {
+                        if (status.isSuccess()) {
+                            Log.i(TAG, "Successfully unsubscribed for data type: " + dataTypeStr);
+                        } else {
+                            Log.i(TAG, "Failed to unsubscribe for data type: " + dataTypeStr);
+                        }
+                    }
+                });
+    }
+	
+	// Using a custom log class that outputs both to in-app targets and logcat.
+    public void initializeLogging() {
+        // Wraps Android's native log framework.
+        LogWrapper logWrapper = new LogWrapper();
+        // Using Log, front-end to the logging chain, emulates android.util.log method signatures.
+        Log.setLogNode(logWrapper);
+        // Filter strips out everything except the message text.
+        MessageOnlyLogFilter msgFilter = new MessageOnlyLogFilter();
+        logWrapper.setNext(msgFilter);
+        // On screen logging via a customized TextView.
+        LogView logView = (LogView) findViewById(R.id.sample_logview);
+        logView.setTextAppearance(this, R.style.Log);
+        logView.setBackgroundColor(Color.WHITE);
+        msgFilter.setNext(logView);
+        Log.i(TAG, "Ready");
+    }
     
 }
